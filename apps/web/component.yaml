@@ -1,0 +1,105 @@
+apiVersion: sourceplane.io/v1
+kind: Component
+metadata:
+  name: web
+  description: The Nuxt site (Nuxt on Cloudflare Workers + Static Assets via Nitro's cloudflare_module preset, per environment)
+spec:
+  type: cloudflare-workers-assets-turbo
+  lifecycle: production
+  owner: platform
+  # Its pages, attached to it in the workspace's catalog: what the Docs
+  # library shows for it, and what the catalog's docs and runbook checks read.
+  # Generated from what this manifest and its sources declare.
+  docs:
+    overview: docs/overview.md
+    pages:
+      - { path: docs/architecture.md, role: architecture, title: Architecture }
+      - { path: docs/runbook.md, role: runbook, title: Runbook }
+  # `app`, not `web`: a domain and a component share one name space in the
+  # catalog, and a domain called `web` would hide this component from it.
+  domain: app
+  path: apps/web
+  # Its own lane per environment: the framework build is the longest job in
+  # the plan, and a shared lane would wait on it.
+  lane: isolated
+  subscribe:
+    environments:
+      - name: dev
+        profile: verify
+      - name: stage
+        profile: verify
+        profileRules:
+          - profile: deploy
+            when:
+              triggerRef: github-push-main
+      - name: prod
+        profile: verify
+        profileRules:
+          - profile: deploy
+            when:
+              triggerRef: github-push-main
+  # How the site runs itself for orun.work's live Preview tab
+  # (saas-parallel-baselining PB4): `orun preview` starts this, and a coding
+  # session keeps it running while it works, so the person watches it change
+  # as it is built. The dev server binds the box's loopback only, on a fixed
+  # port, and installs first, so a checkout the session has not installed yet
+  # still comes up.
+  # --strictPort makes nuxt dev exit rather than move to another port when
+  # 3000 is taken. Nuxt answers on the port at once with its loading page,
+  # which reloads itself into the site once the first build is done; the hot
+  # reload socket is Vite's, on the same port (/_nuxt/).
+  preview:
+    run:
+      - sh
+      - -c
+      - pnpm install --frozen-lockfile --prefer-offline --filter "@app/web..." && exec node_modules/.bin/nuxt dev --host 127.0.0.1 --port 3000 --strictPort
+    port: 3000
+    path: /
+    env:
+      NODE_OPTIONS: --max-old-space-size=512
+      NUXT_TELEMETRY_DISABLED: "1"
+  parameters:
+    nodeVersion: "22"
+    pnpmVersion: "10.12.1"
+
+    workspaceDir: ../..
+    appDir: .
+
+    turboFilter: "@app/web"
+    # The committed config: worker name, compatibility date and flags, the
+    # Worker entry and the ASSETS binding over the build output.
+    wranglerConfig: wrangler.jsonc
+
+    # Nitro's cloudflare_module preset emits the Worker under .output/server
+    # and the static output (the prerendered index, _nuxt/* hashed assets,
+    # public/) under .output/public — both deploy in one `wrangler deploy`.
+    workerEntrypoint: .output/server/index.mjs
+    assetsDir: .output/public
+
+    # Per-env worker name: nuxt-site-3-web-{dev,stage,prod}.
+    workerName: nuxt-site-3-web
+    environmentAwareWorkerName: true
+
+    # The account's workers.dev subdomain; exported to the smoke step as
+    # ${WORKERS_DEV_SUBDOMAIN} and used to build ${DEPLOYED_URL}.
+    workersDevSubdomain: vijayakrishnan12994
+
+    installCommand: pnpm install --frozen-lockfile
+    buildCommand: pnpm exec turbo run build --filter=@app/web
+
+    # Smoke: the home page is the Nuxt app (its `id="__nuxt"` root — not the
+    # site's name, which is the owner's to change (app.config.ts) and
+    # HTML-escaped when it carries an `&` or `'`), and a path no static asset
+    # matches is answered by the Worker's own render. The home page alone is
+    # the pre-rendered index, which Static Assets serves without running the
+    # Worker; the second request is the one that runs it. It must answer 200
+    # (the app has no router, so every path renders app.vue) or, once the app
+    # grows a pages/ directory, Nuxt's 404 — never a 5xx. The page is buffered
+    # before grep so an early match cannot SIGPIPE curl.
+    smokeCommand: "html=$(curl -sfL \"${DEPLOYED_URL}/\") && echo \"${html}\" | grep -q 'id=\"__nuxt\"' && code=$(curl -s -o /dev/null -w '%{http_code}' \"${DEPLOYED_URL}/__smoke\") && { [ \"${code}\" = 200 ] || [ \"${code}\" = 404 ]; }"
+  labels:
+    team: platform
+    layer: delivery
+    surface: web
+    runtime: cloudflare
+# orun: redeploy 01-product as_acfda81342574078a954
